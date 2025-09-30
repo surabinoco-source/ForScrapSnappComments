@@ -1,0 +1,29 @@
+name: Scrape Snappfood Reviews (Weekly)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # Monday 03:00 UTC = 07:00 Asia/Baku
+  workflow_dispatch: {}   # برای اجرای دستی
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm ci || npm i
+
+      - name: Run scraper (push to WordPress)
+        run: node scrape-snapp.js
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+          # اگر بعداً به Google Sheets هم خواستی:
+          # SHEET_ID: ${{ secrets.SHEET_ID }}
+          # GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}

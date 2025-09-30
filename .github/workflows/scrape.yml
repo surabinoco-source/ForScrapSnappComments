@@ -42,3 +42,7 @@ jobs:
           name: debug-shots
           path: |
             debug_before_timeout.png
+            debug_before_timeout.html
+            debug_unhandled.png
+            debug_unhandled.html
+

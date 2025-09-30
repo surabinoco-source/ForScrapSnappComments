@@ -27,3 +27,18 @@ jobs:
           # اگر بعداً به Google Sheets هم خواستی:
           # SHEET_ID: ${{ secrets.SHEET_ID }}
           # GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+# .github/workflows/scrape.yml (فقط این بخش را اضافه کن)
+      - name: Run scraper (push to WordPress)
+        run: node scrape-snapp.js
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-shots
+          path: |
+            debug_before_timeout.png

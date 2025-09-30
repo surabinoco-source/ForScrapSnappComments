@@ -1,5 +1,9 @@
-// scrape-snapp.js — Puppeteer v23 compatible, no $x/no waitForTimeout
+// scrape-snapp.js — stealth + چند روش کلیک + دیباگ کامل
 import puppeteer from 'puppeteer';
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+puppeteerExtra.use(StealthPlugin());
 
 const TARGET_URL = 'https://snappfood.ir/caffe/menu/%D8%AF%D9%86_%DA%A9%D8%A7%D9%81%D9%87__%D9%81%D8%B1%D8%AF%D9%88%D8%B3%DB%8C_-r-0lq8dj/';
 const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
@@ -12,36 +16,51 @@ function makeSlug(title, author, date, text){
 async function closeOverlays(page){
   await page.evaluate(()=>{
     const texts = ['باشه','قبول','متوجه شدم','بستن','×','انتخاب آدرس','فعلاً نه'];
-    const all = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+    const clickable = Array.from(document.querySelectorAll('button,a,[role="button"],[aria-label]'));
     for (const t of texts){
-      const hit = all.find(el => (el.innerText||'').includes(t));
-      if (hit) (hit instanceof HTMLElement) && hit.click();
+      const el = clickable.find(x => (x.innerText||x.getAttribute('aria-label')||'').includes(t));
+      if (el && el instanceof HTMLElement) el.click();
     }
-    const xBtn = document.querySelector('[aria-label="Close"], [class*="close"], [class*="Close"]');
-    if (xBtn && xBtn instanceof HTMLElement) xBtn.click();
+    const x = document.querySelector('[aria-label="Close"],[class*="close"],[class*="Close"]');
+    if (x && x instanceof HTMLElement) x.click();
   });
 }
 
-async function clickReviewsButton(page){
-  // پیدا، اسکرول و کلیک؛ اگر لازم شد کلیک مختصاتی هم می‌زنیم
-  const info = await page.evaluate(()=>{
-    const cand = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
-    const el = cand.find(e => (e.innerText||'').includes('اطلاعات و نظرات'));
+async function clickReviews(page){
+  // 1) DOM: جست‌وجوی متن و کلیک
+  const byText = await page.evaluate(()=>{
+    const cs = Array.from(document.querySelectorAll('button,a,[role="button"],div,span'));
+    const el = cs.find(e => (e.innerText||'').includes('اطلاعات و نظرات'));
     if (!el) return {ok:false};
-    el.scrollIntoView({block:'center'}); 
-    (el instanceof HTMLElement) && el.click();
-    const r = el.getBoundingClientRect();
-    return {ok:true, x: r.x + r.width/2, y: r.y + r.height/2};
+    el.scrollIntoView({block:'center'}); (el instanceof HTMLElement) && el.click();
+    const r = el.getBoundingClientRect(); return {ok:true, x:r.x + r.width/2, y:r.y + r.height/2};
   });
-  if (info?.ok) await page.mouse.click(info.x, info.y, {delay: 30});
+  if (byText?.ok) { await page.mouse.click(byText.x, byText.y, {delay:30}); return true; }
+
+  // 2) XPath داخل خود صفحه (بدون page.$x)
+  const byXPath = await page.evaluate(()=>{
+    const xp = document.evaluate("//*[contains(text(),'اطلاعات و نظرات')]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    const el = xp.singleNodeValue;
+    if (!el) return false;
+    if (el instanceof HTMLElement){ el.scrollIntoView({block:'center'}); el.click(); return true; }
+    return false;
+  });
+  if (byXPath) return true;
+
+  // 3) حدسِ موقعیت: روی نوار راست/وسط چند نقطه کلیک می‌کنیم
+  const { width, height } = await page.viewport();
+  const guess = [[width-180, 300],[width-220, 360],[width/2, 420]];
+  for (const [x,y] of guess) { await page.mouse.click(x,y,{delay:20}); await sleep(200); }
+  return false;
 }
 
 async function waitForCommentsLoaded(page){
-  // صبر تا حداقل یک آیتم نظر دیده شود (در دیالوگ یا صفحه)
   await page.waitForFunction(()=>{
     const dlg = document.querySelector('div[role="dialog"]');
-    return !!(document.querySelector('[class*="Item__Container"]') || (dlg && dlg.querySelector('[class*="Item__Container"]')));
-  }, { timeout: 90000 });
+    const item = document.querySelector('[class*="Item__Container"]') || (dlg && dlg.querySelector('[class*="Item__Container"]'));
+    const title = (dlg && Array.from(dlg.querySelectorAll('*')).some(x => (x.textContent||'').includes('نظرات کاربران')));
+    return !!item || title;
+  }, { timeout: 120000 }); // 120s
 }
 
 async function scrollInsideModal(page){
@@ -49,35 +68,39 @@ async function scrollInsideModal(page){
     const sleep = ms => new Promise(r=>setTimeout(r,ms));
     const list = document.querySelector('[class*="Comments__CommentsList"]') || document.querySelector('div[role="dialog"]');
     const scroller = list || document.scrollingElement || document.documentElement;
-    for (let i=0;i<45;i++){ scroller.scrollBy(0, 1200); await sleep(250); }
+    for (let i=0;i<55;i++){ scroller.scrollBy(0, 1200); await sleep(220); }
   });
 }
 
 async function scrape(){
-  const browser = await puppeteer.launch({
+  const browser = await puppeteerExtra.launch({
     headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-blink-features=AutomationControlled']
+    args: ['--no-sandbox','--disable-setuid-sandbox','--lang=fa-IR,fa','--disable-blink-features=AutomationControlled']
   });
   const page = await browser.newPage();
   await page.setViewport({ width: 1366, height: 900 });
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'fa-IR,fa;q=0.9,en;q=0.8' });
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36');
 
-  try {
+  try{
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-
     await sleep(1200);
     await closeOverlays(page);
     await sleep(500);
-
     await page.evaluate(()=>window.scrollBy(0, 500));
-    await sleep(300);
     await closeOverlays(page);
 
-    await clickReviewsButton(page);
+    // تا 5 بار تلاش برای کلیک
+    let opened = false;
+    for (let i=0;i<5 && !opened;i++){
+      opened = await clickReviews(page);
+      await sleep(700);
+      await closeOverlays(page);
+    }
 
-    try {
+    try{
       await waitForCommentsLoaded(page);
-    } catch (e) {
+    }catch(e){
       await page.screenshot({ path: 'debug_before_timeout.png', fullPage: true });
       const html = await page.content();
       const fs = await import('node:fs/promises');
@@ -109,14 +132,10 @@ async function scrape(){
 
     await browser.close();
     return rows;
-
-  } catch (e) {
+  }catch(e){
     await page.screenshot({ path: 'debug_unhandled.png', fullPage: true }).catch(()=>{});
     const html = await page.content().catch(()=>null);
-    if (html){
-      const fs = await import('node:fs/promises');
-      await fs.writeFile('debug_unhandled.html', html).catch(()=>{});
-    }
+    if (html){ const fs = await import('node:fs/promises'); await fs.writeFile('debug_unhandled.html', html).catch(()=>{}); }
     await browser.close();
     throw e;
   }
@@ -132,19 +151,13 @@ async function pushToWP(rows){
   for (const r of rows) {
     const contentLine = `${r.author || 'بدون نام'} – امتیاز: ${r.rating || '-'} – ${r.text || ''} – ${r.date || ''}`;
     const payload = { title: r.title || 'بدون برچسب', content: `<p>${contentLine.replace(/\n/g,' ')}</p>`, status: 'draft', slug: makeSlug(r.title, r.author, r.date, r.text) };
-
-    const res = await fetch(`${base}/wp-json/wp/v2/posts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': auth },
-      body: JSON.stringify(payload)
-    });
-
+    const res = await fetch(`${base}/wp-json/wp/v2/posts`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': auth }, body: JSON.stringify(payload) });
     if (!res.ok) console.error('WP error:', res.status, await res.text());
     else { const data = await res.json(); console.log('Created post ID:', data.id, 'title:', r.title); }
   }
 }
 
-(async ()=>{
+(async () => {
   try{
     const rows = await scrape();
     console.log('Reviews found:', rows.length);

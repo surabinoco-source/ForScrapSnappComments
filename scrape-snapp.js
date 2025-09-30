@@ -1,13 +1,16 @@
 // scrape-snapp.js
 // Node 18+
-// نیاز به Secrets: WP_URL , WP_USER , WP_APP_PASS
+// Secrets لازم: WP_URL , WP_USER , WP_APP_PASS
 
 import puppeteer from 'puppeteer';
 
 const TARGET_URL = 'https://snappfood.ir/caffe/menu/%D8%AF%D9%86_%DA%A9%D8%A7%D9%81%D9%87__%D9%81%D8%B1%D8%AF%D9%88%D8%B3%DB%8C_-r-0lq8dj/';
 
-function makeSlug(r){
-  const base = `${r.author || 'anon'}-${r.date || ''}-${(r.text||'').slice(0,40)}`.toLowerCase();
+// تبدیل اعداد فارسی به انگلیسی (برای rating/تاریخ اگر خواستی)
+const fa2en = s => (s||'').replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+
+function makeSlug(title, author, date, text){
+  const base = `${title || 'rv'}-${author || ''}-${date || ''}-${(text||'').slice(0,40)}`.toLowerCase();
   return base
     .replace(/[\s\/\\]+/g,'-')
     .replace(/[^a-z0-9\-\u0600-\u06FF]/g,'')
@@ -24,68 +27,63 @@ async function scrape(){
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
   await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
 
-  // اگر تب «اطلاعات و نظرات» جداست، کلیک کن (selector با متن)
+  // 1) باز کردن پاپ‌آپ «اطلاعات و نظرات»
   try {
-    // نسخه‌های مختلف UI را پوشش می‌دهیم
-    const btn = await page.$x(`//button[contains(., 'اطلاعات و نظرات')] | //a[contains(., 'اطلاعات و نظرات')]`);
-    if (btn && btn.length) await btn[0].click();
-  } catch(e){ /* ignore */ }
+    const [btn] = await page.$x(`//button[contains(., 'اطلاعات و نظرات')] | //a[contains(., 'اطلاعات و نظرات')]`);
+    if (btn) {
+      await btn.click();
+    }
+  } catch(_) {}
+  // صبر تا ظاهر شدن پاپ‌آپ
+  await page.waitForSelector('div[role="dialog"], [class*="Comments__"]', { timeout: 15000 }).catch(()=>{});
 
-  // اسکرول برای لود lazy
-  await page.evaluate(async ()=>{
+  // 2) اسکرول داخل لیست نظرات (نه کل صفحه)
+  // کانتینر لیست:
+  const LIST_SELECTOR = '[class*="Comments__CommentsList"]';
+  await page.waitForSelector(LIST_SELECTOR, { timeout: 20000 });
+
+  // اسکرول تدریجی داخل همان کانتینر
+  await page.evaluate(async (LIST_SELECTOR)=>{
     const sleep = ms => new Promise(r=>setTimeout(r,ms));
-    for (let i=0;i<24;i++){ window.scrollBy(0,1400); await sleep(400); }
-  });
+    const box = document.querySelector(LIST_SELECTOR);
+    if (!box) return;
+    for (let i=0;i<25;i++){
+      box.scrollBy(0, 1200);
+      await sleep(350);
+    }
+  }, LIST_SELECTOR);
 
+  // 3) استخراج ساختاریافته دقیقا با کلاس‌هایی که دادی
   const rows = await page.evaluate(()=>{
     const clean = s => (s||'').replace(/\s+/g,' ').trim();
-    const isRTL  = s => /[\u0600-\u06FF]/.test(s||'');
-    const hasReviewHints = t => /نظر|دیدگاه|امتیاز|ستاره|کیفیت|تجربه|سفارش/i.test(t);
 
-    // کاندیدها
-    const candidates = Array.from(document.querySelectorAll(
-      '[class*="review"], [class*="Review"], [class*="comment"], [class*="Comment"], article, li, section, div'
-    )).filter(el=>{
-      const t = clean(el.innerText||'');
-      return isRTL(t) && t.length>40 && hasReviewHints(t);
-    });
+    const list = document.querySelector('[class*="Comments__CommentsList"]');
+    if (!list) return [];
 
-    const seen = new Set();
-    const rows = [];
+    const items = Array.from(list.querySelectorAll('[class*="Item__Container"]'));
+    const out = [];
 
-    for (const card of candidates){
-      const txt = clean(card.innerText||'');
-      const lines = (card.innerText||'').split('\n').map(clean).filter(Boolean);
+    for (const el of items){
+      const info   = el.querySelector('[class*="Item__CommentInfo"]');
+      const body   = el.querySelector('[class*="Item__CommentContent"]');
+      if (!info || !body) continue;
 
-      // author
-      let author = lines[0] || '';
-      if (author.length>30){
-        const strong = card.querySelector('strong, b, [class*="user"], [class*="author"], [class*="name"]');
-        author = strong ? clean(strong.innerText||'') : '';
-      }
+      const author = clean(info.querySelector('p')?.innerText || '');               // اولین <p> در Info اسم کاربر است
+      const allInfoPs = info.querySelectorAll('p');
+      const date   = clean(allInfoPs?.[1]?.innerText || '');                        // دومین <p> تاریخ
+      const rateP  = info.querySelector('[class*="Item__Rate"]');
+      const rating = clean(rateP ? rateP.textContent.replace(/[^۰-۹0-9.]/g,'') : ''); // فقط رقم امتیاز
 
-      // date & rating
-      const dateMatch   = txt.match(/\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}|امروز|دیروز|\d+\s*(روز|ساعت|هفته)\s*پیش/);
-      const ratingMatch = txt.match(/(\d(?:[\.,]\d)?)\s*\/\s*5|(\d(?:[\.,]\d)?)\s*از\s*5|⭐+|ستاره/);
+      const text   = clean(body.querySelector('p')?.innerText || '');               // متن نظر
 
-      // متن نظر
-      let text = txt;
-      [author, dateMatch?.[0], ratingMatch?.[0]].forEach(k=>{ if(k) text = text.replace(k,''); });
-      text = clean(text);
+      // تگ‌ها (عنوان پست)
+      const tagPs  = body.querySelectorAll('[class*="Item__CommentTags"] p');
+      const tags   = Array.from(tagPs).map(p=>clean(p.innerText)).filter(Boolean);
+      const title  = tags.length ? tags.join('، ') : 'بدون برچسب';
 
-      const key = (author||'') + '|' + (dateMatch?.[0]||'') + '|' + text.slice(0,80);
-      if (text && !seen.has(key)){
-        seen.add(key);
-        rows.push({
-          author: author || '',
-          date: dateMatch ? dateMatch[0] : '',
-          rating: ratingMatch ? ratingMatch[0].toString().replace('از','/').replace('٫','.') : '',
-          text
-        });
-      }
+      out.push({ title, author, rating, text, date });
     }
-
-    return rows.slice(0, 300);
+    return out;
   });
 
   await browser.close();
@@ -100,15 +98,15 @@ async function pushToWP(rows){
   const auth = 'Basic ' + Buffer.from(`${process.env.WP_USER}:${process.env.WP_APP_PASS}`).toString('base64');
 
   for (const r of rows) {
+    // محتوای پست طبق خواسته تو
+    // «اسم کاربر - امتیاز - نظر - تاریخ»
+    const contentLine = `${r.author || 'بدون نام'} – امتیاز: ${r.rating || '-'} – ${r.text || ''} – ${r.date || ''}`;
+
     const payload = {
-      title: `نظر - ${r.author || 'بدون نام'} - ${r.date || 'بدون تاریخ'}`,
-      content:
-        `<p><strong>امتیاز:</strong> ${r.rating || '-'}</p>` +
-        `<p>${(r.text || '').replace(/\n/g, '<br>')}</p>`,
+      title: r.title || 'بدون برچسب',
+      content: `<p>${contentLine.replace(/\n/g,' ')}</p>`,
       status: 'draft',
-      slug: makeSlug(r)
-      // اگر custom post type داری، endpoint را در fetch عوض کن
-      // و می‌توانی categories / tags اضافه کنی.
+      slug: makeSlug(r.title, r.author, r.date, r.text)
     };
 
     const res = await fetch(`${base}/wp-json/wp/v2/posts`, {
@@ -125,16 +123,15 @@ async function pushToWP(rows){
       console.error('WP error:', res.status, errText);
     } else {
       const data = await res.json();
-      console.log('Created post ID:', data.id);
+      console.log('Created post ID:', data.id, 'title:', r.title);
     }
   }
 }
 
 (async ()=>{
   const rows = await scrape();
-  console.log('Scraped reviews:', rows.length);
+  console.log('Reviews found:', rows.length);
   if (!rows.length) return;
-
   await pushToWP(rows);
   console.log('Done.');
 })();
